@@ -156,50 +156,131 @@ opt_qpinn = optim.Lamb(qpinn_model.parameters(), lr=1e-2, weight_decay=0, betas=
 scheduler_pinn  = torch.optim.lr_scheduler.CosineAnnealingLR(opt_pinn,  T_max=cos_epochs, eta_min=1e-3)
 scheduler_qpinn = torch.optim.lr_scheduler.CosineAnnealingLR(opt_qpinn, T_max=cos_epochs, eta_min=1e-3)
 
+# ======================= #
+# 📁 保存设置
+# ======================= #
+import os
+import csv
+from pathlib import Path
+
+save_dir = Path("results")
+save_dir.mkdir(exist_ok=True)
+
+# CSV headers
+pinn_csv = save_dir / "pinn_losses.csv"
+qpinn_csv = save_dir / "qpinn_losses.csv"
+
+# Write headers once
+for csv_path, header in [
+    (pinn_csv,  ["epoch", "total", "pde", "bc1", "bc2"]),
+    (qpinn_csv, ["epoch", "total", "pde", "bc1", "bc2"])
+]:
+    if not csv_path.exists():
+        with open(csv_path, "w", newline="") as f:
+            csv.writer(f).writerow(header)
+
+# How often to checkpoint the full model
+save_every = 1
+
+# Track best loss for final save
+best_pinn_loss = float("inf")
+best_qpinn_loss = float("inf")
+best_pinn_epoch = -1
+best_qpinn_epoch = -1
+
+# ======================= #
+# 🔁 训练循环 (修改版)
+# ======================= #
 losses_pinn, losses_qpinn = [], []
 
-# =======================
-# 🔁 训练循环
-# =======================
 for epoch in range(epochs):
     tc, xc = sample_collocation(50)
     tb1, xb1 = sample_boundary(50)
     tb2, xb2 = sample_boundary2(50)
 
-    # --- PINN ---
+    # ------------------- #
+    #   PINN
+    # ------------------- #
     res_p = hjb_residual(pinn_model, tc, xc)
     lpde_p = mse(res_p, torch.zeros_like(res_p))
     lbc1_p = mse(pinn_model(tb1, xb1), U(xb1))
     lbc2_p = mse(pinn_model(tb2, xb2), torch.exp(-k * (T - tb2)) / gamma)
     loss_p = lpde_p + lbc1_p + 5 * lbc2_p
+
     opt_pinn.zero_grad()
     loss_p.backward()
     opt_pinn.step()
     if epoch <= cos_epochs:
         scheduler_pinn.step()
 
-    # --- QPINN ---
+    # ------------------- #
+    #   QPINN
+    # ------------------- #
     res_q = hjb_residual(qpinn_model, tc, xc)
     lpde_q = mse(res_q, torch.zeros_like(res_q))
     lbc1_q = mse(qpinn_model(tb1, xb1), U(xb1))
     lbc2_q = mse(qpinn_model(tb2, xb2), torch.exp(-k * (T - tb2)) / gamma)
     loss_q = lpde_q + lbc1_q + 5 * lbc2_q
+
     opt_qpinn.zero_grad()
     loss_q.backward()
     opt_qpinn.step()
     if epoch <= cos_epochs:
         scheduler_qpinn.step()
 
+    # ------------------- #
+    #   记录 & 保存
+    # ------------------- #
     losses_pinn.append(loss_p.item())
     losses_qpinn.append(loss_q.item())
 
-    if epoch % 5 == 0:
-        print(f"[Epoch {epoch}] PINN: {loss_p.item():.3e} | QPINN: {loss_q.item():.3e}")
-        print(f"   details: PDE={lpde_q.item():.3e}, BC1={lbc1_q.item():.3e}, BC2={lbc2_q.item():.3e}")
+    # CSV row
+    with open(pinn_csv, "a", newline="") as f:
+        csv.writer(f).writerow([epoch,
+                                f"{loss_p.item():.6e}",
+                                f"{lpde_p.item():.6e}",
+                                f"{lbc1_p.item():.6e}",
+                                f"{lbc2_p.item():.6e}"])
+    with open(qpinn_csv, "a", newline="") as f:
+        csv.writer(f).writerow([epoch,
+                                f"{loss_q.item():.6e}",
+                                f"{lpde_q.item():.6e}",
+                                f"{lbc1_q.item():.6e}",
+                                f"{lbc2_q.item():.6e}"])
 
+    # Periodic checkpoint
+    if (epoch + 1) % save_every == 0:
+        torch.save(pinn_model.state_dict(),
+                   save_dir / f"pinn_epoch{epoch+1:04d}.pt")
+        torch.save(qpinn_model.state_dict(),
+                   save_dir / f"qpinn_epoch{epoch+1:04d}.pt")
+
+    # ------------------- #
+    #   日志输出
+    # ------------------- #
+    if epoch % 5 == 0:
+        print(f"[Epoch {epoch:04d}] "
+              f"PINN: {loss_p.item():.3e} | QPINN: {loss_q.item():.3e}")
+        print(f"  details → PDE={lpde_q.item():.3e}, "
+              f"BC1={lbc1_q.item():.3e}, BC2={lbc2_q.item():.3e}")
+
+    # ------------------- #
+    #   学习率切换
+    # ------------------- #
     if epoch == cos_epochs:
-        opt_pinn  = optim.Lamb(pinn_model.parameters(),  lr=1e-3, weight_decay=0, betas=(0.0, 0.0))
-        opt_qpinn = optim.Lamb(qpinn_model.parameters(), lr=1e-3, weight_decay=0, betas=(0.0, 0.0))
+        opt_pinn = optim.Lamb(pinn_model.parameters(),
+                              lr=1e-3, weight_decay=0, betas=(0.0, 0.0))
+        opt_qpinn = optim.Lamb(qpinn_model.parameters(),
+                               lr=1e-3, weight_decay=0, betas=(0.0, 0.0))
     if epoch == 300:
-        opt_pinn  = optim.Lamb(pinn_model.parameters(),  lr=1e-4, weight_decay=0, betas=(0.0, 0.0))
-        opt_qpinn = optim.Lamb(qpinn_model.parameters(), lr=1e-4, weight_decay=0, betas=(0.0, 0.0))
+        opt_pinn = optim.Lamb(pinn_model.parameters(),
+                              lr=1e-4, weight_decay=0, betas=(0.0, 0.0))
+        opt_qpinn = optim.Lamb(qpinn_model.parameters(),
+                               lr=1e-4, weight_decay=0, betas=(0.0, 0.0))
+
+# ----------------------- #
+# 训练结束后打印最佳模型信息
+# ----------------------- #
+print("\n=== Training finished ===")
+print(f"Best PINN  – epoch {best_pinn_epoch:04d}, loss {best_pinn_loss:.3e} → saved as 'pinn_best.pt'")
+print(f"Best QPINN – epoch {best_qpinn_epoch:04d}, loss {best_qpinn_loss:.3e} → saved as 'qpinn_best.pt'")
